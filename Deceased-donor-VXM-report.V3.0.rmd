@@ -1,0 +1,649 @@
+---
+title: "Deceased donor assessment report"
+output:
+  pdf_document: default
+fontsize: 11pt
+header-includes:
+  \usepackage{helvet}
+  \renewcommand{\familydefault}{\sfdefault}
+  \usepackage{fancyhdr}
+  \pagestyle{fancy}
+  \setlength{\headheight}{13.59999pt}
+  \fancyhead[L]{Deceased donor assessment report}
+  \fancyhead[R]{`r as.integer(format(Sys.time(), '%m'))`/`r as.integer(format(Sys.time(), '%d'))`/`r format(Sys.time(), '%Y')`}
+---
+# Report date: `r as.integer(format(Sys.time(), '%m'))`/`r as.integer(format(Sys.time(), '%d'))`/`r format(Sys.time(), '%Y')`
+
+```{r include=FALSE}
+#This is a self-contained program. All you need to do is press the "knit" button above. It will ask you for the patient MRN and the donor ID, and then create a PDF report.
+
+#The code below prompts RStudio to ask you for the patient's MRN, and then the donor's UNOS ID.
+MRN_patient <- rstudioapi::askForPassword("Patient MRN")
+First_name_donor <- rstudioapi::askForPassword("Donor ID")
+```
+
+```{r eval=FALSE, include=FALSE}
+#This is test code. Turn off the code chunk above and type in the MRN and donor ID for an example report when testing new code, so you don't have to type in the data to the pop-up boxes every time. Turn this code off, and the code above on when you are ready to use the program in production.
+
+MRN_patient <- "XXXX"
+First_name_donor <- "XXXX"
+```
+
+```{r eval=FALSE, include=FALSE}
+#These are all of the plugins that are required for this program to work. These only need to be installed once, which is why this code chunk is set to "eval=FALSE." 
+install.packages("DBI")
+install.packages("odbc")
+install.packages("tidyverse")
+install.packages("tinytex")
+install.packages("lubridate")
+install.packages("kableExtra")
+tinytex::install_tinytex()
+```
+
+```{r include=FALSE}
+#These are the libraries (plugins) that are required for this program to run. The first two are required to connect to the HistoTrac SQL server, "tidyverse" enables the use of more user-friendly code, "kableExtra" allows for more customizable tables on the final report, and "lubridate" helps with using time and date data.
+library(DBI)
+library(odbc)
+library(tidyverse)
+library(kableExtra)
+library(lubridate)
+
+#Creating a connection to the HistoTrac server
+con <- dbConnect(odbc::odbc(), "HistoTrac", timeout = 10)
+
+#Connecting to the Patient table in HisoTrac, and pulling out the entry for the patient.
+(Patient <- tbl(con, "Patient") 
+  %>% select(PatientId, HospitalID, firstnm, lastnm, DOB, categoryCd: GenderCd, PatientTypeCd, A1Cd:dq2cd, mA1Cd:mDPB12cd, StatusCd, UnacceptAntigenTxt, mA1EqCd, mDPB12EqCd, UNOSCPRAAmt, UNOSUnacceptAntigenTxt)
+  %>% filter(HospitalID == MRN_patient)
+  %>% as_tibble
+)
+
+#Extracting the PatientId from HistoTrac, which will allow for linking to the donor
+Patient_Id <- Patient$PatientId
+
+#Connecting to the RelatedPatient table in HistoTrac
+(RelatedPatient <- tbl(con, "RelatedPatient") 
+  %>% select(CaseId, RelatedPatientID, RelationshipTypeCd))
+
+#Connecting to the Patient table again, but this time to get the donor info out (donors are also stored in the Pateint table in HisoTrac)
+(Donor <- tbl(con, "Patient") 
+  %>% select(PatientId, HospitalID, firstnm, lastnm, DOB, categoryCd: GenderCd, PatientTypeCd, A1Cd:dq2cd, mA1Cd:mDPB12cd, StatusCd, UnacceptAntigenTxt, mA1EqCd, mDPB12EqCd, UNOSCPRAAmt, UNOSUnacceptAntigenTxt)
+  )
+
+#Connecting to the PatientCase table, and linking to the RelatedPatient and Donor tables to get donors
+(PatientCase <- tbl(con, "PatientCase") 
+  %>% select(PatientId, CaseId)
+  %>% filter(PatientId == Patient_Id)
+  %>% left_join(RelatedPatient, by = "CaseId")
+  %>% left_join(Donor, by = c("RelatedPatientID" = "PatientId"))
+  %>% as_tibble
+)
+
+#Lininking donors to the patient record, and selecting for the donor of interest
+(Case <- Patient 
+  %>% left_join(PatientCase, by = "PatientId", suffix = c(".recipient", ".donor"))
+  %>% filter(firstnm.donor == First_name_donor)
+  
+  #Keep only the first row if the donor is listed more than once
+  %>% slice_head(n = 1)
+  
+  #To ensure matching is accurate, all non-numbers or colons (:) will be removed from typing fields (e.g. remove asterisks, or G or P group designations). "N" for null alleles are kept.
+  %>% mutate(across(A1Cd.recipient:mDPB12cd.recipient, ~str_extract(., "[[:digit:]:Nn]+")))
+  %>% mutate(across(A1Cd.donor:mDPB12cd.donor, ~str_extract(., "[[:digit:]:Nn]+")))
+  
+  #For Cw typing, make sure only numbers are recorded, without leading zeros.
+  %>% mutate(Cw1Cd.recipient = as.character(as.integer(str_extract(Cw1Cd.recipient, "[:digit:]+"))))
+  %>% mutate(Cw2Cd.recipient = as.character(as.integer(str_extract(Cw2Cd.recipient, "[:digit:]+"))))
+  %>% mutate(Cw1Cd.donor = as.character(as.integer(str_extract(Cw1Cd.donor, "[:digit:]+"))))
+  %>% mutate(Cw2Cd.donor = as.character(as.integer(str_extract(Cw2Cd.donor, "[:digit:]+"))))
+  
+  #For low res DPB1 typing, I will convert it all to a new serologic equivalent, which will just be the first field, without any leading zeros. This will align best with the SAB specificities.
+  %>% mutate(DP1Cd.recipient = as.character(as.integer(str_extract(mDPB11cd.recipient, "[:digit:]+"))), .after = dq2cd.recipient)
+  %>% mutate(DP2Cd.recipient = as.character(as.integer(str_extract(mDPB12cd.recipient, "[:digit:]+"))), .after = DP1Cd.recipient)
+    %>% mutate(DP1Cd.donor = as.character(as.integer(str_extract(mDPB11cd.donor, "[:digit:]+"))), .after = dq2cd.donor)
+  %>% mutate(DP2Cd.donor = as.character(as.integer(str_extract(mDPB12cd.donor, "[:digit:]+"))), .after = DP1Cd.donor)
+  
+  #For DQA1 and DPA1 typing, I will create a low-res version of just the first field to enable matching and DSA determination
+  %>% mutate(DQA1.1.LR.recipient = as.character(str_extract(mDQA11Cd.recipient, "[:digit:]+")), .after = mDQA12Cd.recipient)
+  %>% mutate(DQA1.2.LR.recipient = as.character(str_extract(mDQA12Cd.recipient, "[:digit:]+")), .after = DQA1.1.LR.recipient)
+  %>% mutate(DQA1.1.LR.donor = as.character(str_extract(mDQA11Cd.donor, "[:digit:]+")), .after = mDQA12Cd.donor)
+  %>% mutate(DQA1.2.LR.donor = as.character(str_extract(mDQA12Cd.donor, "[:digit:]+")), .after = DQA1.1.LR.donor)
+  
+  %>% mutate(DPA1.1.LR.recipient = as.character(str_extract(mDPA11Cd.recipient, "[:digit:]+")), .after = mDPA12Cd.recipient)
+  %>% mutate(DPA1.2.LR.recipient = as.character(str_extract(mDPA12Cd.recipient, "[:digit:]+")), .after = DPA1.1.LR.recipient)
+  %>% mutate(DPA1.1.LR.donor = as.character(str_extract(mDPA11Cd.donor, "[:digit:]+")), .after = mDPA12Cd.donor)
+  %>% mutate(DPA1.2.LR.donor = as.character(str_extract(mDPA12Cd.donor, "[:digit:]+")), .after = DPA1.1.LR.donor)
+  )
+```
+
+```{r include=FALSE}
+#Determine mismatches between recipient and donor
+
+#Determine mismatched HvG alleles (high resolution).
+#Copy typing from first allele at each locus to second in cases of homozygosity. This will ensure accurate matching.
+(Case_full <- Case
+   %>% mutate(across(where(is.character), ~na_if(., "")))
+   %>% mutate(mA2Cd.recipient = coalesce(mA2Cd.recipient, mA1Cd.recipient))  
+   %>% mutate(mB2Cd.recipient = coalesce(mB2Cd.recipient, mB1Cd.recipient)) 
+   %>% mutate(mC2Cd.recipient = coalesce(mC2Cd.recipient, mC1Cd.recipient)) 
+   %>% mutate(mDRB12Cd.recipient = coalesce(mDRB12Cd.recipient, mDRB11Cd.recipient)) 
+   %>% mutate(mDQA12Cd.recipient = coalesce(mDQA12Cd.recipient, mDQA11Cd.recipient)) 
+   %>% mutate(mDQB12cd.recipient = coalesce(mDQB12cd.recipient, mDQB11cd.recipient)) 
+   %>% mutate(mDPA12Cd.recipient = coalesce(mDPA12Cd.recipient, mDPA11Cd.recipient)) 
+   %>% mutate(mDPB12cd.recipient = coalesce(mDPB12cd.recipient, mDPB11cd.recipient))
+  
+   %>% mutate(mA2Cd.donor = coalesce(mA2Cd.donor, mA1Cd.donor))  
+   %>% mutate(mB2Cd.donor = coalesce(mB2Cd.donor, mB1Cd.donor)) 
+   %>% mutate(mC2Cd.donor = coalesce(mC2Cd.donor, mC1Cd.donor)) 
+   %>% mutate(mDRB12Cd.donor = coalesce(mDRB12Cd.donor, mDRB11Cd.donor)) 
+   %>% mutate(mDQA12Cd.donor = coalesce(mDQA12Cd.donor, mDQA11Cd.donor)) 
+   %>% mutate(mDQB12cd.donor = coalesce(mDQB12cd.donor, mDQB11cd.donor)) 
+   %>% mutate(mDPA12Cd.donor = coalesce(mDPA12Cd.donor, mDPA11Cd.donor)) 
+   %>% mutate(mDPB12cd.donor = coalesce(mDPB12cd.donor, mDPB11cd.donor))
+   )
+
+#The mutate function makes new columns for mismatches at each locus. For the first line of code, the code makes a new column called "A.1.HvG," and then looks at the value of "mA1Cd.donor" to see if it is present in either "mA1Cd.recipient" or "mA2Cd.recipient." If it finds the value in either, then it records "NA" in "A.1.HvG." The "TRUE" argument copies the value of "mA1Cd.donor" whenever that value is not found in either of the recipient columns. An easier way to understand this is to see that "case_when" is similar to "if_else:" if the value of "mA1Cd.donor" is found in either "mA1Cd.recipient" or "mA2Cd.recipient," then record "NA," else, copy the value of "mA1Cd.donor."
+
+(Case_MM_HR <- Case_full 
+ #A locus mismatches
+   %>% mutate(A.1.HvG = case_when(mA1Cd.donor == mA1Cd.recipient | mA1Cd.donor == mA2Cd.recipient ~ NA_character_, TRUE ~ as.character(mA1Cd.donor)), A.1.HvG = case_when(!is.na(A.1.HvG) ~ str_glue("A*{A.1.HvG}"))) 
+   %>% mutate(A.2.HvG = case_when(mA2Cd.donor == mA1Cd.recipient | mA2Cd.donor == mA2Cd.recipient ~ NA_character_, TRUE ~ as.character(mA2Cd.donor)), A.2.HvG = case_when(!is.na(A.2.HvG) ~ str_glue("A*{A.2.HvG}")))
+#B locus mismatches 
+   %>% mutate(B.1.HvG = case_when(mB1Cd.donor == mB1Cd.recipient | mB1Cd.donor == mB2Cd.recipient ~ NA_character_, TRUE ~ as.character(mB1Cd.donor)), B.1.HvG = case_when(!is.na(B.1.HvG) ~ str_glue("B*{B.1.HvG}"))) 
+   %>% mutate(B.2.HvG = case_when(mB2Cd.donor == mB1Cd.recipient | mB2Cd.donor == mB2Cd.recipient ~ NA_character_, TRUE ~ as.character(mB2Cd.donor)), B.2.HvG = case_when(!is.na(B.2.HvG) ~ str_glue("B*{B.2.HvG}")))
+#C locus mismatches 
+   %>% mutate(C.1.HvG = case_when(mC1Cd.donor == mC1Cd.recipient | mC1Cd.donor == mC2Cd.recipient ~ NA_character_, TRUE ~ as.character(mC1Cd.donor)), C.1.HvG = case_when(!is.na(C.1.HvG) ~ str_glue("C*{C.1.HvG}"))) 
+   %>% mutate(C.2.HvG = case_when(mC2Cd.donor == mC1Cd.recipient | mC2Cd.donor == mC2Cd.recipient ~ NA_character_, TRUE ~ as.character(mC2Cd.donor)), C.2.HvG = case_when(!is.na(C.2.HvG) ~ str_glue("C*{C.2.HvG}")))
+#DRB1 locus mismatches 
+   %>% mutate(DRB1.1.HvG = case_when(mDRB11Cd.donor == mDRB11Cd.recipient | mDRB11Cd.donor == mDRB12Cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB11Cd.donor)), DRB1.1.HvG = case_when(!is.na(DRB1.1.HvG) ~ str_glue("DRB1*{DRB1.1.HvG}"))) 
+   %>% mutate(DRB1.2.HvG = case_when(mDRB12Cd.donor == mDRB11Cd.recipient | mDRB12Cd.donor == mDRB12Cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB12Cd.donor)), DRB1.2.HvG = case_when(!is.na(DRB1.2.HvG) ~ str_glue("DRB1*{DRB1.2.HvG}")))
+#DRB3 locus mismatches
+%>% mutate(DRB3.1.HvG = case_when(mDRB31cd.donor == mDRB31cd.recipient | mDRB31cd.donor == mDRB32cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB31cd.donor)), DRB3.1.HvG = case_when(!is.na(DRB3.1.HvG) ~ str_glue("DRB3*{DRB3.1.HvG}"))) 
+   %>% mutate(DRB3.2.HvG = case_when(mDRB32cd.donor == mDRB31cd.recipient | mDRB32cd.donor == mDRB32cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB32cd.donor)), DRB3.2.HvG = case_when(!is.na(DRB3.2.HvG) ~ str_glue("DRB3*{DRB3.2.HvG}")))
+#DRB4 locus mismatches
+%>% mutate(DRB4.1.HvG = case_when(mDRB41cd.donor == mDRB41cd.recipient | mDRB41cd.donor == mDRB42cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB41cd.donor)), DRB4.1.HvG = case_when(!is.na(DRB4.1.HvG) ~ str_glue("DRB4*{DRB4.1.HvG}"))) 
+   %>% mutate(DRB4.2.HvG = case_when(mDRB42cd.donor == mDRB41cd.recipient | mDRB42cd.donor == mDRB42cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB42cd.donor)), DRB4.2.HvG = case_when(!is.na(DRB4.2.HvG) ~ str_glue("DRB4*{DRB4.2.HvG}")))
+#DRB5 locus mismatches
+%>% mutate(DRB5.1.HvG = case_when(mDRB51cd.donor == mDRB51cd.recipient | mDRB51cd.donor == mDRB52cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB51cd.donor)), DRB5.1.HvG = case_when(!is.na(DRB5.1.HvG) ~ str_glue("DRB5*{DRB5.1.HvG}"))) 
+   %>% mutate(DRB5.2.HvG = case_when(mDRB52cd.donor == mDRB51cd.recipient | mDRB52cd.donor == mDRB52cd.recipient ~ NA_character_, TRUE ~ as.character(mDRB52cd.donor)), DRB5.2.HvG = case_when(!is.na(DRB5.2.HvG) ~ str_glue("DRB5*{DRB5.2.HvG}")))
+#DQB1 locus mismatches 
+   %>% mutate(DQB1.1.HvG = case_when(mDQB11cd.donor == mDQB11cd.recipient | mDQB11cd.donor == mDQB12cd.recipient ~ NA_character_, TRUE ~ as.character(mDQB11cd.donor)), DQB1.1.HvG = case_when(!is.na(DQB1.1.HvG) ~ str_glue("DQB1*{DQB1.1.HvG}"))) 
+   %>% mutate(DQB1.2.HvG = case_when(mDQB12cd.donor == mDQB11cd.recipient | mDQB12cd.donor == mDQB12cd.recipient ~ NA_character_, TRUE ~ as.character(mDQB12cd.donor)), DQB1.2.HvG = case_when(!is.na(DQB1.2.HvG) ~ str_glue("DQB1*{DQB1.2.HvG}")))
+#DPB1 locus mismatches 
+   %>% mutate(DPB1.1.HvG = case_when(mDPB11cd.donor == mDPB11cd.recipient | mDPB11cd.donor == mDPB12cd.recipient ~ NA_character_, TRUE ~ as.character(mDPB11cd.donor)), DPB1.1.HvG = case_when(!is.na(DPB1.1.HvG) ~ str_glue("DPB1*{DPB1.1.HvG}"))) 
+   %>% mutate(DPB1.2.HvG = case_when(mDPB12cd.donor == mDPB11cd.recipient | mDPB12cd.donor == mDPB12cd.recipient ~ NA_character_, TRUE ~ as.character(mDPB12cd.donor)), DPB1.2.HvG = case_when(!is.na(DPB1.2.HvG) ~ str_glue("DPB1*{DPB1.2.HvG}")))
+   )
+
+#Calculate mismatches at low resolution, at the A, B, C, DR, DQ, DQA, DPA and DP loci. 
+(Case_MM <- Case_MM_HR 
+   %>% mutate(A.1.mismatch = case_when(A1Cd.donor == A1Cd.recipient | A1Cd.donor == A2Cd.recipient ~ NA_character_, TRUE ~ as.character(A1Cd.donor))) 
+   %>% mutate(A.2.mismatch = case_when(A2Cd.donor == A1Cd.recipient | A2Cd.donor == A2Cd.recipient ~ NA_character_, TRUE ~ as.character(A2Cd.donor)))
+   %>% mutate(B.1.mismatch = case_when(B1Cd.donor == B1Cd.recipient | B1Cd.donor == B2Cd.recipient ~ NA_character_, TRUE ~ as.character(B1Cd.donor))) 
+   %>% mutate(B.2.mismatch = case_when(B2Cd.donor == B1Cd.recipient | B2Cd.donor == B2Cd.recipient ~ NA_character_, TRUE ~ as.character(B2Cd.donor)))
+   %>% mutate(Bw.1.mismatch = case_when(BW1Cd.donor == BW1Cd.recipient | BW1Cd.donor == Bw2Cd.recipient ~ NA_character_, TRUE ~ as.character(BW1Cd.donor))) 
+   %>% mutate(Bw.2.mismatch = case_when(Bw2Cd.donor == BW1Cd.recipient | Bw2Cd.donor == Bw2Cd.recipient ~ NA_character_, TRUE ~ as.character(Bw2Cd.donor)))
+   %>% mutate(Cw.1.mismatch = case_when(Cw1Cd.donor == Cw1Cd.recipient | Cw1Cd.donor == Cw2Cd.recipient ~ NA_character_, TRUE ~ as.character(Cw1Cd.donor))) 
+   %>% mutate(Cw.2.mismatch = case_when(Cw2Cd.donor == Cw1Cd.recipient | Cw2Cd.donor == Cw2Cd.recipient ~ NA_character_, TRUE ~ as.character(Cw2Cd.donor)))
+   %>% mutate(DR.1.mismatch = case_when(DR1Cd.donor == DR1Cd.recipient | DR1Cd.donor == DR2Cd.recipient ~ NA_character_, TRUE ~ as.character(DR1Cd.donor))) 
+   %>% mutate(DR.2.mismatch = case_when(DR2Cd.donor == DR1Cd.recipient | DR2Cd.donor == DR2Cd.recipient ~ NA_character_, TRUE ~ as.character(DR2Cd.donor)))
+   %>% mutate(DR.51.52.53.1.mismatch = case_when(drw1cd.donor == drw1cd.recipient | drw1cd.donor == drw2cd.recipient ~ NA_character_, TRUE ~ as.character(drw1cd.donor)))
+   %>% mutate(DR.51.52.53.2.mismatch = case_when(drw2cd.donor == drw1cd.recipient | drw2cd.donor == drw2cd.recipient ~ NA_character_, TRUE ~ as.character(drw2cd.donor)))
+   %>% mutate(DQ.1.mismatch = case_when(dq1cd.donor == dq1cd.recipient | dq1cd.donor == dq2cd.recipient ~ NA_character_, TRUE ~ as.character(dq1cd.donor))) 
+   %>% mutate(DQ.2.mismatch = case_when(dq2cd.donor == dq1cd.recipient | dq2cd.donor == dq2cd.recipient ~ NA_character_, TRUE ~ as.character(dq2cd.donor)))
+   %>% mutate(DQA.1.mismatch = case_when(DQA1.1.LR.donor == DQA1.1.LR.recipient | DQA1.1.LR.donor == DQA1.2.LR.recipient ~ NA_character_, TRUE ~ as.character(DQA1.1.LR.donor))) 
+   %>% mutate(DQA.2.mismatch = case_when(DQA1.2.LR.donor == DQA1.1.LR.recipient | DQA1.2.LR.donor == DQA1.2.LR.recipient ~ NA_character_, TRUE ~ as.character(DQA1.2.LR.donor)))
+   %>% mutate(DP.1.mismatch = case_when(DP1Cd.donor == DP1Cd.recipient | DP1Cd.donor == DP2Cd.recipient ~ NA_character_, TRUE ~ as.character(DP1Cd.donor))) 
+   %>% mutate(DP.2.mismatch = case_when(DP2Cd.donor == DP1Cd.recipient | DP2Cd.donor == DP2Cd.recipient ~ NA_character_, TRUE ~ as.character(DP2Cd.donor)))
+   %>% mutate(DPA.1.mismatch = case_when(DPA1.1.LR.donor == DPA1.1.LR.recipient | DPA1.1.LR.donor == DPA1.2.LR.recipient ~ NA_character_, TRUE ~ as.character(DPA1.1.LR.donor))) 
+   %>% mutate(DPA.2.mismatch = case_when(DPA1.2.LR.donor == DPA1.1.LR.recipient | DPA1.2.LR.donor == DPA1.2.LR.recipient ~ NA_character_, TRUE ~ as.character(DPA1.2.LR.donor)))
+ 
+#Place "A," "DR," etc. at the beginning of mismatches so that the typing will line up with SAB results.
+  %>% mutate(A.1.mismatch = case_when(!is.na(A.1.mismatch) ~ str_glue("A{A.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(A.2.mismatch = case_when(!is.na(A.2.mismatch) ~ str_glue("A{A.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(B.1.mismatch = case_when(!is.na(B.1.mismatch) ~ str_glue("B{B.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(B.2.mismatch = case_when(!is.na(B.2.mismatch) ~ str_glue("B{B.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(Bw.1.mismatch = case_when(!is.na(Bw.1.mismatch) ~ str_glue("Bw{Bw.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(Bw.2.mismatch = case_when(!is.na(Bw.2.mismatch) ~ str_glue("Bw{Bw.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(Cw.1.mismatch = case_when(!is.na(Cw.1.mismatch) ~ str_glue("Cw{Cw.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(Cw.2.mismatch = case_when(!is.na(Cw.2.mismatch) ~ str_glue("Cw{Cw.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DR.1.mismatch = case_when(!is.na(DR.1.mismatch) ~ str_glue("DR{DR.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DR.2.mismatch = case_when(!is.na(DR.2.mismatch) ~ str_glue("DR{DR.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DR.51.52.53.1.mismatch = case_when(!is.na(DR.51.52.53.1.mismatch) ~ str_glue("DR{DR.51.52.53.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DR.51.52.53.2.mismatch = case_when(!is.na(DR.51.52.53.2.mismatch) ~ str_glue("DR{DR.51.52.53.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DQ.1.mismatch = case_when(!is.na(DQ.1.mismatch) ~ str_glue("DQ{DQ.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DQ.2.mismatch = case_when(!is.na(DQ.2.mismatch) ~ str_glue("DQ{DQ.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DQA.1.mismatch = case_when(!is.na(DQA.1.mismatch) ~ str_glue("DQA1*{DQA.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DQA.2.mismatch = case_when(!is.na(DQA.2.mismatch) ~ str_glue("DQA1*{DQA.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DP.1.mismatch = case_when(!is.na(DP.1.mismatch) ~ str_glue("DP{DP.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DP.2.mismatch = case_when(!is.na(DP.2.mismatch) ~ str_glue("DP{DP.2.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DPA.1.mismatch = case_when(!is.na(DPA.1.mismatch) ~ str_glue("DPA1*{DPA.1.mismatch}"), TRUE ~ NA_character_))
+  %>% mutate(DPA.2.mismatch = case_when(!is.na(DPA.2.mismatch) ~ str_glue("DPA1*{DPA.2.mismatch}"), TRUE ~ NA_character_))
+  )
+
+```
+
+```{r include=FALSE}
+(Test <- tbl(con, "Test") 
+  %>% select(TestId:TestTypeCd)
+)
+
+(TestDetail <- tbl(con, "TestDetail") 
+  %>% select(TestId, TestDetailTypeCd, SingleAgBead, SingleAgRaw, SingleAgNormalized, SingleAgSpecAbbr, SingleAgSpecificity)
+)
+
+(Sample <- tbl(con, "Sample") 
+  %>% select(PatientId, SampleID, SampleNbr, SampleDt, SpecimenTypeCd, StatusCd)
+  %>% rename(SampleId = SampleID)
+  %>% filter(PatientId == Patient_Id)
+  %>% left_join(Test, by = "SampleId")
+  %>% filter(TestTypeCd == "HLA DSA1" | TestTypeCd == "HLA DSA2" | TestTypeCd == "HLA LSA1" | TestTypeCd == "HLA LSA2" | TestTypeCd == "HLADSA1" | TestTypeCd == "HLADSA2" | TestTypeCd == "HLALSA1" | TestTypeCd == "HLALSA2" | TestTypeCd == "LSA1" | TestTypeCd == "LSA2")
+  %>% left_join(TestDetail, by = "TestId")
+  %>% filter(!is.na(SingleAgNormalized))
+  %>% as_tibble
+)
+
+(Case_MM_SAB_tests <- Case_MM
+   %>% left_join(Sample, by = "PatientId")
+  #Separate the Bw4/w6 specificities into a separate column.
+   %>% separate(SingleAgSpecAbbr, sep = ",", into = c("SAB_sero_spec", "SAB_Bw4Bw6_spec"), fill = "right")
+  
+   #Separate DQA and DQB specificities into separate columns.
+   %>% separate(SingleAgSpecificity, sep = ",", into = c("SingleAgSpecificity.A", "SingleAgSpecificity.B"), fill = "right")
+  #Replace all "NA" values with "blank," otherwise the DSA matching with think that anything with an "NA" value is a DSA.
+   %>% mutate(SingleAgSpecificity.B = replace_na(SingleAgSpecificity.B, "blank"))
+  
+  #Extract first field DQA1 and DPA1 typing into a separate column for low res DQA and DPA DSA determination.
+  %>% mutate(DPA_DQA_LR_specificity = str_extract(SingleAgSpecificity.A, "D[:alpha:]A1\\*[:digit:]+"))
+  #Replace all "NA" values with "blank," otherwise the DSA matching with think that anything with an "NA" value is a DSA.
+  %>% mutate(DPA_DQA_LR_specificity = replace_na(DPA_DQA_LR_specificity, "blank"))
+)
+```
+
+```{r include=FALSE}
+#Join SAB results to recipient/donor table by HvG mismatch (high resolution).
+(A_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("A.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ A.1.HvG), .after = SingleAgNormalized)
+   )
+
+(A_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("A.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ A.2.HvG), .after = SingleAgNormalized)
+   )
+
+(B_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("B.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ B.1.HvG), .after = SingleAgNormalized)
+   )
+
+(B_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("B.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ B.2.HvG), .after = SingleAgNormalized)
+   )
+
+(C_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("C.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ C.1.HvG), .after = SingleAgNormalized)
+   )
+
+(C_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("C.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ C.2.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB1_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB1.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB1.1.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB1_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB1.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB1.2.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB3_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB3.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB3.1.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB3_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB3.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB3.2.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB4_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB4.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB4.1.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB4_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB4.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB4.2.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB5_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB5.1.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB5.1.HvG), .after = SingleAgNormalized)
+   )
+
+(DRB5_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DRB5.2.HvG" = "SingleAgSpecificity.A"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DRB5.2.HvG), .after = SingleAgNormalized)
+   )
+
+(DQB1_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DQB1.1.HvG" = "SingleAgSpecificity.B"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DQB1.1.HvG), .after = SingleAgNormalized)
+   )
+
+(DQB1_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DQB1.2.HvG" = "SingleAgSpecificity.B"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DQB1.2.HvG), .after = SingleAgNormalized)
+   )
+
+(DPB1_1_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DPB1.1.HvG" = "SingleAgSpecificity.B"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DPB1.1.HvG), .after = SingleAgNormalized)
+   )
+
+(DPB1_2_DSAs_HR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DPB1.2.HvG" = "SingleAgSpecificity.B"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DPB1.2.HvG), .after = SingleAgNormalized)
+   )
+
+#Join all the tables into one
+(Patient_DSAs_HR <- bind_rows(A_1_DSAs_HR, A_2_DSAs_HR, B_1_DSAs_HR, B_2_DSAs_HR, C_1_DSAs_HR, C_2_DSAs_HR, DRB1_1_DSAs_HR, DRB1_2_DSAs_HR, DRB3_1_DSAs_HR, DRB3_2_DSAs_HR, DRB4_1_DSAs_HR, DRB4_2_DSAs_HR, DRB5_1_DSAs_HR, DRB5_2_DSAs_HR, DQB1_1_DSAs_HR, DQB1_2_DSAs_HR, DPB1_1_DSAs_HR, DPB1_2_DSAs_HR)
+    )
+```
+
+```{r include=FALSE}
+#Join SAB results to recipient/donor table by mismatch (low resolution).
+(A_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("A.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ A.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(A_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("A.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ A.2.mismatch), .after = DP.2.mismatch)
+   )
+
+(B_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("B.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ B.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(B_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("B.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ B.2.mismatch), .after = DP.2.mismatch)
+   )
+
+(C_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("Cw.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ Cw.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(C_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("Cw.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ Cw.2.mismatch), .after = DP.2.mismatch)
+   )
+
+(DR_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DR.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DR.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(DR_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DR.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DR.2.mismatch), .after = DP.2.mismatch)
+   )
+
+(DR51_52_53_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DR.51.52.53.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DR.51.52.53.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(DR51_52_53_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DR.51.52.53.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DR.51.52.53.2.mismatch), .after = DP.2.mismatch)
+   )
+
+(DQ_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DQ.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DQ.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(DQ_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DQ.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DQ.2.mismatch), .after = DP.2.mismatch)
+   )
+
+
+
+(DQA_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DQA.1.mismatch" = "DPA_DQA_LR_specificity"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DQA.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(DQA_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DQA.2.mismatch" = "DPA_DQA_LR_specificity"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DQA.2.mismatch), .after = DP.2.mismatch)
+   )
+
+
+(DPA_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DPA.1.mismatch" = "DPA_DQA_LR_specificity"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DPA.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(DPA_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DPA.2.mismatch" = "DPA_DQA_LR_specificity"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DPA.2.mismatch), .after = DP.2.mismatch)
+   )
+
+
+(DP_1_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DP.1.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DP.1.mismatch), .after = DP.2.mismatch)
+   )
+
+(DP_2_DSAs_LR <- Case_MM 
+   %>% inner_join(select(Case_MM_SAB_tests, SampleId:DPA_DQA_LR_specificity), by = c("DP.2.mismatch" = "SAB_sero_spec"))
+   %>% mutate(DSA = case_when(!is.na(SingleAgNormalized) ~ DP.2.mismatch), .after = DP.2.mismatch)
+   )
+
+#Join all the tables into one
+(Patient_DSAs_LR <- bind_rows(A_1_DSAs_LR, A_2_DSAs_LR, B_1_DSAs_LR, B_2_DSAs_LR, C_1_DSAs_LR, C_2_DSAs_LR, DR_1_DSAs_LR, DR_2_DSAs_LR, DR51_52_53_1_DSAs_LR, DR51_52_53_2_DSAs_LR, DQ_1_DSAs_LR, DQ_2_DSAs_LR, DP_1_DSAs_LR, DP_2_DSAs_LR, DQA_1_DSAs_LR, DQA_2_DSAs_LR, DPA_1_DSAs_LR, DPA_2_DSAs_LR)
+    )
+```
+
+```{r include=FALSE}
+(HR_DSA_table <- Patient_DSAs_HR 
+  %>% select(SampleDt, SampleNbr, DSA, SingleAgNormalized)
+  %>% distinct(.keep_all = TRUE)
+  %>% arrange(DSA, SampleDt)
+)
+
+(LR_DSA_table <- Patient_DSAs_LR 
+  %>% select(SampleDt, SampleNbr, DSA, SingleAgSpecificity.A, SingleAgSpecificity.B, SingleAgNormalized)
+  %>% distinct(.keep_all = TRUE)
+  %>% arrange(DSA, SampleDt)
+  %>% mutate(SingleAgSpecificity.B = str_replace(SingleAgSpecificity.B, "blank", ""))
+    )
+
+(Current_sample <- LR_DSA_table
+  %>% mutate(Sample_age = floor(difftime(Sys.time(), SampleDt, units = "days")))
+  %>% arrange(Sample_age)
+  %>% slice_head()
+  %>% select(SampleDt, Sample_age)
+  )
+```
+
+```{r include=FALSE}
+#Create recipient and donor typing and mismatch table
+
+#Recipeint typing
+(Recipient_typing <- Case 
+  %>% select(A1Cd.recipient:dq2cd.recipient, mDQA11Cd.recipient, mDQA12Cd.recipient, mDPB11cd.recipient, mDPB12cd.recipient, mDPA11Cd.recipient, mDPA12Cd.recipient)
+    )
+
+(Recipient_typing_1 <- Recipient_typing
+  %>% select(!contains("2"))
+  %>% rename(A = A1Cd.recipient)
+  %>% rename(B = B1Cd.recipient)
+  %>% rename(Bw = BW1Cd.recipient)
+  %>% rename(Cw = Cw1Cd.recipient)
+  %>% rename(DR = DR1Cd.recipient)
+  %>% rename(DR5X = drw1cd.recipient)
+  %>% rename(DQ = dq1cd.recipient)
+  %>% rename(DQA1 = mDQA11Cd.recipient)
+  %>% rename(DPB1 = mDPB11cd.recipient)
+  %>% rename(DPA1 = mDPA11Cd.recipient)
+  )
+
+(Recipient_typing_2 <- Recipient_typing
+  %>% select(contains("2"))
+  %>% rename(A = A2Cd.recipient)
+  %>% rename(B = B2Cd.recipient)
+  %>% rename(Bw = Bw2Cd.recipient)
+  %>% rename(Cw = Cw2Cd.recipient)
+  %>% rename(DR = DR2Cd.recipient)
+  %>% rename(DR5X = drw2cd.recipient)
+  %>% rename(DQ = dq2cd.recipient)
+  %>% rename(DQA1 = mDQA12Cd.recipient)
+  %>% rename(DPB1 = mDPB12cd.recipient)
+  %>% rename(DPA1 = mDPA12Cd.recipient)
+  )
+
+(Recipient_typing_report <- bind_rows(Recipient_typing_1, Recipient_typing_2)
+  %>% mutate(Case = "Recipient", .before = A)
+    )
+
+#Recording (or overwriting) new values in the data frame - this is used to delete "Recipient" on the second row, to make the table look nicer, and then to add a new, blank row so that there will be a space between recipient and donor typing when they are joined below.
+#data.frame[row_number, column_number] = new_value
+Recipient_typing_report[2, 1] = ""
+#Recipient_typing_report[3, 1] = ""
+
+print(Recipient_typing_report)
+
+#Donor typing
+(Donor_typing <- Case 
+  %>% select(A1Cd.donor:dq2cd.donor, mDQA11Cd.donor, mDQA12Cd.donor, mDPB11cd.donor, mDPB12cd.donor, mDPA11Cd.donor, mDPA12Cd.donor)
+    )
+
+(Donor_typing_1 <- Donor_typing
+  %>% select(!contains("2"))
+  %>% rename(A = A1Cd.donor)
+  %>% rename(B = B1Cd.donor)
+  %>% rename(Bw = BW1Cd.donor)
+  %>% rename(Cw = Cw1Cd.donor)
+  %>% rename(DR = DR1Cd.donor)
+  %>% rename(DR5X = drw1cd.donor)
+  %>% rename(DQ = dq1cd.donor)
+  %>% rename(DQA1 = mDQA11Cd.donor)
+  %>% rename(DPB1 = mDPB11cd.donor)
+  %>% rename(DPA1 = mDPA11Cd.donor)
+  )
+
+(Donor_typing_2 <- Donor_typing
+  %>% select(contains("2"))
+  %>% rename(A = A2Cd.donor)
+  %>% rename(B = B2Cd.donor)
+  %>% rename(Bw = Bw2Cd.donor)
+  %>% rename(Cw = Cw2Cd.donor)
+  %>% rename(DR = DR2Cd.donor)
+  %>% rename(DR5X = drw2cd.donor)
+  %>% rename(DQ = dq2cd.donor)
+  %>% rename(DQA1 = mDQA12Cd.donor)
+  %>% rename(DPB1 = mDPB12cd.donor)
+  %>% rename(DPA1 = mDPA12Cd.donor)
+  )
+
+(Donor_typing_report <- bind_rows(Donor_typing_1,Donor_typing_2)
+  %>% mutate(Case = "Donor", .before = A)
+    )
+
+#data.frame[row_number, column_number] = new_value
+Donor_typing_report[2, 1] = ""
+#Donor_typing_report[3, 1] = ""
+
+print(Donor_typing_report)
+
+#Calculate MM numbers to go below recipient and donor typing. This only calculates MMs at A, B, Bw, C, DR, DR5X,  DQ, and DPB1. I will have to update mismatching on DQA1 and DPA1 before I can include this below.
+(MM_by_locus <- Case_MM 
+  %>% mutate(A = as.character(as.integer(!is.na(A.1.mismatch)) + as.integer(!is.na(A.2.mismatch))))
+  %>% mutate(B = as.character(as.integer(!is.na(B.1.mismatch)) + as.integer(!is.na(B.2.mismatch))))
+  %>% mutate(Bw = as.character(as.integer(!is.na(Bw.1.mismatch)) + as.integer(!is.na(Bw.2.mismatch))))
+  %>% mutate(Cw = as.character(as.integer(!is.na(Cw.1.mismatch)) + as.integer(!is.na(Cw.2.mismatch))))
+  %>% mutate(DR = as.character(as.integer(!is.na(DR.1.mismatch)) + as.integer(!is.na(DR.2.mismatch))))
+  %>% mutate(DR5X = as.character(as.integer(!is.na(DR.51.52.53.1.mismatch)) + as.integer(!is.na(DR.51.52.53.2.mismatch))))
+  %>% mutate(DQ = as.character(as.integer(!is.na(DQ.1.mismatch)) + as.integer(!is.na(DQ.2.mismatch))))
+  %>% mutate(DQA1 = as.character((!is.na(DQA.1.mismatch)) + as.integer(!is.na(DQA.2.mismatch))))
+  %>% mutate(DPB1 = as.character(as.integer(!is.na(DPB1.1.HvG)) + as.integer(!is.na(DPB1.2.HvG))))
+  %>% mutate(DPA1 = as.character((!is.na(DPA.1.mismatch)) + as.integer(!is.na(DPA.2.mismatch))))
+  %>% select(A, B, Bw, Cw, DR, DR5X, DQ, DQA1, DPB1, DPA1) 
+  %>% mutate(Case = "Mismatches", .before = A)
+)
+
+
+
+(total_typing_report <- bind_rows(Recipient_typing_report, Donor_typing_report, MM_by_locus)
+  %>% mutate(across(everything(), ~replace_na(.x, "")))
+    )
+```
+```{r include=FALSE}
+#Extract low res mismatches for printing on report
+(LR_MM <- Case_MM 
+  %>% select(A.1.mismatch:DQA.2.mismatch, DPB1.1.HvG:DPB1.2.HvG, DPA.1.mismatch:DPA.2.mismatch)
+  #The asterisk in "DQA1*," etc. was causing the text on the report to be italicized. This code inserts "\\" before the asterisk to escape this character, so the text shows up properly on the report.
+  %>% mutate(DQA.1.mismatch = str_extract(DQA.1.mismatch, "(?<=[:punct:])[:graph:]+"))
+  %>% mutate(DQA.1.mismatch = case_when(!is.na(DQA.1.mismatch) ~ str_glue("DQA1\\*{DQA.1.mismatch}")))
+  %>% mutate(DQA.2.mismatch = str_extract(DQA.2.mismatch, "(?<=[:punct:])[:graph:]+"))
+  %>% mutate(DQA.2.mismatch = case_when(!is.na(DQA.2.mismatch) ~ str_glue("DQA1\\*{DQA.2.mismatch}"))) 
+ 
+  %>% mutate(DPB1.1.HvG = str_extract(DPB1.1.HvG, "(?<=[:punct:])[:graph:]+"))
+  %>% mutate(DPB1.1.HvG = case_when(!is.na(DPB1.1.HvG) ~ str_glue("DPB1\\*{DPB1.1.HvG}")))
+  %>% mutate(DPB1.2.HvG = str_extract(DPB1.2.HvG, "(?<=[:punct:])[:graph:]+"))
+  %>% mutate(DPB1.2.HvG = case_when(!is.na(DPB1.2.HvG) ~ str_glue("DPB1\\*{DPB1.2.HvG}")))
+ 
+  %>% mutate(DPA.1.mismatch = str_extract(DPA.1.mismatch, "(?<=[:punct:])[:graph:]+"))
+  %>% mutate(DPA.1.mismatch = case_when(!is.na(DPA.1.mismatch) ~ str_glue("DPA1\\*{DPA.1.mismatch}")))
+  %>% mutate(DPA.2.mismatch = str_extract(DPA.2.mismatch, "(?<=[:punct:])[:graph:]+"))
+  %>% mutate(DPA.2.mismatch = case_when(!is.na(DPA.2.mismatch) ~ str_glue("DPA1\\*{DPA.2.mismatch}")))
+  )
+
+(LR_MM_vector <- as.character(as.vector(LR_MM[1,])))
+
+(LR_MM_vector_clean <- na.omit(LR_MM_vector))
+```
+**Patient:** `r Case$lastnm.recipient`, `r Case$firstnm.recipient` **MRN:** `r Case$HospitalID.recipient`  
+**Donor:** `r Case$firstnm.donor`  
+**Organ type:** `r Case$categoryCd.recipient`  
+&nbsp;
+```{r echo=FALSE}
+#Table of typing
+kbl(total_typing_report, booktabs = TRUE, col.names = c('Case', 'A', 'B', 'Bw', 'Cw', 'DR', 'DR5X', 'DQ', 'DQA1*', 'DPB1*', 'DPA1*')) %>% kable_styling(full_width = T) %>%
+column_spec(1, width = "2cm") %>% row_spec(2, hline_after = TRUE) %>% row_spec(4, hline_after = TRUE) %>% kable_styling(latex_options = "hold_position")
+```  
+&nbsp;  
+**Mismatched donor antigens:** `r LR_MM_vector_clean`   
+
+**A,B,DR,DQ summary matching:** `r MM_by_locus$A`A, `r MM_by_locus$B`B, `r MM_by_locus$DR`DR, `r MM_by_locus$DQ`DQ mismatch  
+
+\newpage
+
+# Antibody data
+**Most recently-tested antibody sample:** `r month(Current_sample$SampleDt)`/`r day(Current_sample$SampleDt)`/`r year(Current_sample$SampleDt)`  
+**Sample age:** `r Current_sample$Sample_age` days  
+&nbsp;  
+  
+```{r, echo=FALSE}
+#Graph LR DSAs
+ggplot(LR_DSA_table, aes(x = SampleDt, y = SingleAgNormalized, color = DSA)) + geom_point() +stat_summary(aes(y = SingleAgNormalized), fun=mean, geom="line") +geom_hline(yintercept = 1000) +labs(x = "Sample date", y = "MFI", title = "Low-resolution DSAs") +theme_bw()
+```
+
+```{r echo=FALSE}
+#Table of LR DSAs
+kbl(LR_DSA_table, longtable = T, booktabs = TRUE, linesep = "", caption = "Low-resolution DSA specificities", col.names = c('Date', 'Sample #', 'Serology', 'Bead', '', 'MFI')) %>% kable_styling(latex_options = ("repeat_header")) 
+
+```
